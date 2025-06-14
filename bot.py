@@ -1,80 +1,55 @@
 import os
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import yt_dlp
 
-TOKEN = os.getenv("TOKEN")
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+TOKEN = os.environ["TOKEN"]
+logging.basicConfig(level=logging.INFO)
+
 user_links = {}
 
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    await msg.answer("Привет! Отправь ссылку на YouTube-видео, и я предложу варианты для скачивания.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Пришли мне ссылку на видео YouTube.")
 
-@dp.message_handler()
-async def handle_link(msg: types.Message):
-    url = msg.text.strip()
-    if not url.startswith("http"):
-        await msg.reply("Пожалуйста, пришли корректную ссылку.")
-        return
-
-    user_links[msg.from_user.id] = url
-    buttons = []
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    chat_id = update.message.chat_id
     try:
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
-            formats = info.get("formats", [])
-            seen = set()
-            for fmt in formats:
-                height = fmt.get("height")
-                filesize = fmt.get("filesize")
-                if height in [360, 480, 720, 1080] and height not in seen and filesize:
-                    seen.add(height)
-                    text = f"{height}p — {fmt.get('width')}x{fmt.get('height')} ({round(filesize/1024/1024, 1)} MB)"
-                    buttons.append(InlineKeyboardButton(text, callback_data=f"dl_{height}"))
-
-        if not buttons:
-            await msg.reply("Не удалось найти форматы для загрузки.")
-        else:
-            kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(*buttons)
-            await msg.reply("Выберите качество:", reply_markup=kb)
+            formats = info.get('formats', [info])
+            buttons = []
+            added = set()
+            user_links[chat_id] = {}
+            for f in formats:
+                if f.get('ext') != 'mp4' or not f.get('filesize') or not f.get('height'):
+                    continue
+                quality = f"{f.get('height')}p"
+                if quality in added:
+                    continue
+                added.add(quality)
+                label = f"{quality} — {f['width']}x{f['height']} ({round(f['filesize'] / 1024 / 1024, 1)} MB)"
+                user_links[chat_id][quality] = f['url']
+                buttons.append([InlineKeyboardButton(label, callback_data=quality)])
+            await update.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
-        await msg.reply(f"Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
-@dp.callback_query_handler(lambda c: c.data.startswith("dl_"))
-async def download_quality(callback: types.CallbackQuery):
-    height = int(callback.data.split("_")[1])
-    url = user_links.get(callback.from_user.id)
-    if not url:
-        await callback.answer("Ссылка не найдена. Отправь её снова.")
-        return
-    out_name = f"video_{callback.from_user.id}_{height}p.mp4"
-    try:
-        ydl_opts = {
-            'format': f'bestvideo[height={height}]+bestaudio/best[height={height}]',
-            'outtmpl': out_name,
-            'merge_output_format': 'mp4',
-            'quiet': True
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        await bot.send_chat_action(callback.from_user.id, action=types.ChatActions.UPLOAD_VIDEO)
-        await bot.send_video(callback.from_user.id, open(out_name, 'rb'))
-        os.remove(out_name)
-    except Exception as e:
-        await callback.message.answer(f"Ошибка при загрузке: {e}")
-    await callback.answer()
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    quality = query.data
+    chat_id = query.message.chat_id
+    video_url = user_links.get(chat_id, {}).get(quality)
+    if video_url:
+        await context.bot.send_video(chat_id=chat_id, video=video_url, caption=f"Вот ваше видео в {quality}")
+    else:
+        await query.edit_message_text("Не удалось найти ссылку.")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    from aiogram import executor
-    executor.start_polling(dp)
-
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.run_polling()
