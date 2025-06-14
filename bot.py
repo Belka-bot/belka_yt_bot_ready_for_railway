@@ -2,7 +2,8 @@
 import os
 import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     chat_id = update.effective_chat.id
