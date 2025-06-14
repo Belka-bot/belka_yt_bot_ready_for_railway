@@ -1,82 +1,89 @@
-
 import os
-import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import yt_dlp
-
-logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("TOKEN")
 
-quality_buttons = {}
+user_video_data = {}
+
+def get_keyboard(formats):
+    buttons = []
+    added = set()
+    for f in formats:
+        height = f.get("height")
+        filesize = f.get("filesize")
+        resolution = f.get("resolution")
+        if height and filesize and height not in added:
+            size_mb = round(filesize / 1024 / 1024, 1)
+            label = f"{height}p — {resolution} ({size_mb} MB)"
+            buttons.append([InlineKeyboardButton(label, callback_data=str(height))])
+            added.add(height)
+    return InlineKeyboardMarkup(buttons)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправь мне ссылку на видео с YouTube.")
+    await update.message.reply_text("Отправь ссылку на видео с YouTube.")
 
-def sizeof_fmt(num, suffix="B"):
-    for unit in ["", "K", "M", "G", "T"]:
-        if abs(num) < 1024.0:
-            return f"{num:.1f} {unit}{suffix}"
-        num /= 1024.0
-    return f"{num:.1f} P{suffix}"
-
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    await update.message.reply_text("Скачиваю информацию о видео...")
+    await update.message.reply_text("🔍 Обрабатываю ссылку...")
 
     ydl_opts = {
         'quiet': True,
         'skip_download': True,
         'forcejson': True,
-        'extract_flat': False
+        'extract_flat': False,
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        formats = [f for f in info["formats"] if f.get("filesize") and f.get("height")]
+        formats.sort(key=lambda x: x.get("height"))
 
-            buttons = []
-            quality_buttons[update.effective_chat.id] = {}
+        user_video_data[update.effective_chat.id] = {
+            "formats": formats,
+            "title": info.get("title")
+        }
 
-            seen = set()
-            for fmt in formats:
-                height = fmt.get('height')
-                fsize = fmt.get('filesize')
-                url = fmt.get('url')
-                if not height or not fsize or not url:
-                    continue
-                if height in seen:
-                    continue
-                seen.add(height)
+        keyboard = get_keyboard(formats)
+        await update.message.reply_text("Выберите качество:", reply_markup=keyboard)
 
-                label = f"{height}p — {fmt['width']}x{height} ({sizeof_fmt(fsize)})"
-                callback_data = f"{height}|{fmt['url']}"
-
-                buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
-                quality_buttons[update.effective_chat.id][str(height)] = fmt['url']
-
-            if buttons:
-                await update.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(buttons))
-            else:
-                await update.message.reply_text("Не удалось найти подходящие форматы.")
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка: {e}")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    height, video_url = query.data.split("|")
+    height = int(query.data)
 
-    await query.message.reply_text(f"Скачиваю {height}p...")
-    await context.bot.send_video(chat_id=query.message.chat.id, video=video_url)
+    video_data = user_video_data.get(query.message.chat.id)
+    if not video_data:
+        await query.edit_message_text("⚠️ Видео не найдено.")
+        return
+
+    format_info = next((f for f in video_data["formats"] if f.get("height") == height), None)
+    if not format_info:
+        await query.edit_message_text("⚠️ Формат недоступен.")
+        return
+
+    url = format_info["url"]
+    filename = f"video_{height}p.mp4"
+
+    ydl_opts = {
+        'outtmpl': filename,
+        'format': f"best[height={height}]",
+    }
+
+    await query.edit_message_text("⬇️ Скачиваю видео...")
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    with open(filename, "rb") as f:
+        await context.bot.send_video(chat_id=query.message.chat.id, video=f, caption=video_data["title"])
+
+    os.remove(filename)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
-    app.add_handler(CallbackQueryHandler(button_handler))
-
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(CallbackQueryHandler(handle_quality_choice))
     app.run_polling()
