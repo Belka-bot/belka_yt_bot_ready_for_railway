@@ -1,7 +1,50 @@
 
 import os
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    chat_id = update.effective_chat.id
+
+    # Отправим "Скачиваю..."
+    await update.message.reply_text("Скачиваю видео...")
+
+    # Настройки yt_dlp
+    ydl_opts = {
+        'quiet': True,
+        'cookiefile': 'cookies.txt',
+        'skip_download': True,
+        'format': 'bestvideo+bestaudio/best',
+    }
+
+    # Список кнопок
+    keyboard = []
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        formats = info.get('formats', [])
+
+        for f in formats:
+            if (
+                f.get('height') in [360, 480, 720, 1080]
+                and f.get('ext') == 'mp4'
+                and f.get('filesize')
+            ):
+                height = f['height']
+                size_mb = round(f['filesize'] / (1024 * 1024), 1)
+                button = InlineKeyboardButton(
+                    f"{height}p — {f['width']}x{height} ({size_mb} MB)",
+                    callback_data=f"download|{f['format_id']}|{url}"
+                )
+                keyboard.append([button])
+
+    # Отправляем кнопки
+    if keyboard:
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Выбери качество:", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("Не удалось получить форматы видео.")
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from yt_dlp import YoutubeDL
 
@@ -27,28 +70,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Выберите качество:", reply_markup=reply_markup)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    choice, url = query.data.split("|")
-    chat_id = query.message.chat_id
+
+    data = query.data
+    url, format_id = data.split('|')
+
+    ydl_opts = {
+        'format': format_id,
+        'outtmpl': f'video_{format_id}.mp4',
+        'merge_output_format': 'mp4',
+        'cookiefile': 'cookies.txt',
+    }
 
     await query.edit_message_text("Скачиваю видео...")
 
-    quality = {
-        "360": "bestvideo[height<=360]+bestaudio/best[height<=360]",
-        "720": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    }[choice]
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
-    ydl_opts = {
-        "format": quality,
-        "outtmpl": f"{chat_id}_{int(time.time())}.mp4",
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-        "cookiefile": "cookies.txt"
-    }
+    with open(f'video_{format_id}.mp4', 'rb') as video:
+        await context.bot.send_video(chat_id=query.message.chat.id, video=video)
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split("|")
+    if data[0] == "download":
+        format_id = data[1]
+        url = data[2]
+
+        await query.edit_message_text(text="Скачиваю выбранное качество...")
+
+        ydl_opts = {
+            'format': format_id,
+            'outtmpl': 'video.mp4',
+            'merge_output_format': 'mp4',
+            'cookiefile': 'cookies.txt',
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        await context.bot.send_video(
+            chat_id=update.effective_chat.id,
+            video=open("video.mp4", "rb")
+        )
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
