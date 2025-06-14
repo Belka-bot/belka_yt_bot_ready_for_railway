@@ -55,7 +55,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ydl.download([url])
 
         filename = ydl_opts["outtmpl"]
-        with open(filename, "rb") as f:
+        with open(video_path, 'rb') as f:
             await context.bot.send_video(chat_id=chat_id, video=f)
 
         os.remove(filename)
