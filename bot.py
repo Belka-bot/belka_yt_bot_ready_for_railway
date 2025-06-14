@@ -1,55 +1,82 @@
+
 import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import yt_dlp
 
-TOKEN = os.environ["TOKEN"]
 logging.basicConfig(level=logging.INFO)
 
-user_links = {}
+TOKEN = os.environ.get("TOKEN")
+
+quality_buttons = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Пришли мне ссылку на видео YouTube.")
+    await update.message.reply_text("Отправь мне ссылку на видео с YouTube.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def sizeof_fmt(num, suffix="B"):
+    for unit in ["", "K", "M", "G", "T"]:
+        if abs(num) < 1024.0:
+            return f"{num:.1f} {unit}{suffix}"
+        num /= 1024.0
+    return f"{num:.1f} P{suffix}"
+
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    chat_id = update.message.chat_id
+    await update.message.reply_text("Скачиваю информацию о видео...")
+
+    ydl_opts = {
+        'quiet': True,
+        'skip_download': True,
+        'forcejson': True,
+        'extract_flat': False
+    }
+
     try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [info])
+            formats = info.get('formats', [])
+
             buttons = []
-            added = set()
-            user_links[chat_id] = {}
-            for f in formats:
-                if f.get('ext') != 'mp4' or not f.get('filesize') or not f.get('height'):
+            quality_buttons[update.effective_chat.id] = {}
+
+            seen = set()
+            for fmt in formats:
+                height = fmt.get('height')
+                fsize = fmt.get('filesize')
+                url = fmt.get('url')
+                if not height or not fsize or not url:
                     continue
-                quality = f"{f.get('height')}p"
-                if quality in added:
+                if height in seen:
                     continue
-                added.add(quality)
-                label = f"{quality} — {f['width']}x{f['height']} ({round(f['filesize'] / 1024 / 1024, 1)} MB)"
-                user_links[chat_id][quality] = f['url']
-                buttons.append([InlineKeyboardButton(label, callback_data=quality)])
-            await update.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(buttons))
+                seen.add(height)
+
+                label = f"{height}p — {fmt['width']}x{height} ({sizeof_fmt(fsize)})"
+                callback_data = f"{height}|{fmt['url']}"
+
+                buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+                quality_buttons[update.effective_chat.id][str(height)] = fmt['url']
+
+            if buttons:
+                await update.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(buttons))
+            else:
+                await update.message.reply_text("Не удалось найти подходящие форматы.")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    quality = query.data
-    chat_id = query.message.chat_id
-    video_url = user_links.get(chat_id, {}).get(quality)
-    if video_url:
-        await context.bot.send_video(chat_id=chat_id, video=video_url, caption=f"Вот ваше видео в {quality}")
-    else:
-        await query.edit_message_text("Не удалось найти ссылку.")
+    height, video_url = query.data.split("|")
+
+    await query.message.reply_text(f"Скачиваю {height}p...")
+    await context.bot.send_video(chat_id=query.message.chat.id, video=video_url)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
     app.run_polling()
